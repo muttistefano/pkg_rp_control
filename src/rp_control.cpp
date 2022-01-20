@@ -17,6 +17,9 @@ platform_run::platform_run(ros::NodeHandle* nh_in, std::string host_name)
     _nh = *nh_in;
     _host_name = host_name;
 
+    MovePlat  = _nh.advertiseService("MovePlat_" + _host_name, &platform_run::MovePlatSrvCall, this);
+    _pub_conf = _nh.advertise<std_msgs::Int8>("Plat_conf_"+ _host_name, 1, true);
+
     this->pins_setup();
 
     std::thread t1(&platform_run::safety_task, this);
@@ -25,8 +28,11 @@ platform_run::platform_run(ros::NodeHandle* nh_in, std::string host_name)
     std::thread t2(&platform_run::odometry, this);
     t2.detach();
 
-    MovePlat  = _nh.advertiseService("MovePlat_" + _host_name, &platform_run::MovePlatSrvCall, this);
-    _pub_conf = _nh.advertise<std_msgs::Int8>("Plat_conf_"+ _host_name, 1, true);
+    ros::Duration(1).sleep();
+
+    std_msgs::Int8 conf_msg = std_msgs::Int8();
+    conf_msg.data = 0;
+    _pub_conf.publish(conf_msg);
 
     ROS_INFO("rp_control started \n");
 
@@ -267,3 +273,6 @@ int main(int argc, char **argv)
 
 
 }
+
+
+//TODO ignora fine coras in partenza

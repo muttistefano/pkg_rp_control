@@ -1,4 +1,0 @@
-int8 position_command
----
-bool success
-int8 position_final

@@ -1,5 +1,5 @@
-#include<pkg_rp_control/rp_control.h>
 #include<pkg_rp_control/pins_def.h>
+#include<pkg_rp_control/rp_control.h>
 #include <signal.h>
 
 std::string GetEnv( const std::string & var ) {
@@ -19,11 +19,12 @@ platform_run::platform_run(ros::NodeHandle* nh_in, std::string host_name)
 
     MovePlat  = _nh.advertiseService("MovePlat_" + _host_name, &platform_run::MovePlatSrvCall, this);
     _pub_conf = _nh.advertise<std_msgs::Int8>("Plat_conf_"+ _host_name, 1, true);
+    _pub_odom = _nh.advertise<std_msgs::Float64>("Plat_odom_"+ _host_name, 1, true);
 
     this->pins_setup();
 
-    std::thread t1(&platform_run::safety_task, this);
-    t1.detach();
+    // std::thread t1(&platform_run::safety_task, this);
+    // t1.detach();
 
     std::thread t2(&platform_run::odometry, this);
     t2.detach();
@@ -40,12 +41,25 @@ platform_run::platform_run(ros::NodeHandle* nh_in, std::string host_name)
 
 
 
-bool platform_run::MovePlatSrvCall(pkg_rp_control::MovePlatSrv::Request  &req,
-                              pkg_rp_control::MovePlatSrv::Response &res)
+bool platform_run::MovePlatSrvCall(pkg_rp_msgs::MovePlatSrv::Request  &req,
+                              pkg_rp_msgs::MovePlatSrv::Response &res)
 {
-    //TODO
+    //TODO prendi distanze
     std::cout << "Moving plat: " << _host_name << " to pos : " << int(req.position_command) << "\n";
-    ros::Duration(2).sleep();
+    if (req.position_command == 0)
+    {
+      this->move(0,1.9,10);
+    }
+    else if (req.position_command == 1)
+    {
+      this->move(1,1.9,10);
+    }
+    else
+    {
+      return false;
+    }
+    
+    // ros::Duration(2).sleep();
     res.position_final = req.position_command;
     res.success = true;
     std_msgs::Int8 conf_msg = std_msgs::Int8();
@@ -54,15 +68,6 @@ bool platform_run::MovePlatSrvCall(pkg_rp_control::MovePlatSrv::Request  &req,
     return true;
 }
 
-void platform_run::safety_task()
-{
-  //TODO if there will be safety, ensure the button is pressed for a couple of cycles
-  while (ros::ok())
-  {
-     this->_safe = 1;//digitalRead(bumper_pin);
-     this->_rate.sleep();
-  }
-}
 
 void my_handler(int s){
   printf("Caught signal %d\n",s);
@@ -82,13 +87,19 @@ void platform_run::pins_setup()
   pinMode (PWM_dir_1, OUTPUT) ;
   pinMode (PWM_dir_2, OUTPUT) ;
 
-  pinMode (bumper_pin, INPUT) ;
-  pullUpDnControl(bumper_pin,PUD_UP);
+  pinMode (bumper_pin_1, INPUT) ;
+  pinMode (bumper_pin_2, INPUT) ;
+  pullUpDnControl(bumper_pin_1,PUD_UP);
+  pullUpDnControl(bumper_pin_2,PUD_UP);
 
   pinMode (EncR1,INPUT);
   pinMode (EncR2,INPUT);
   pinMode (EncL1,INPUT);
   pinMode (EncL2,INPUT);
+  pullUpDnControl(EncR1,PUD_UP);
+  pullUpDnControl(EncR2,PUD_UP);
+  pullUpDnControl(EncL1,PUD_UP);
+  pullUpDnControl(EncL2,PUD_UP);
 
   if (wiringPiISR (EncR1, INT_EDGE_RISING, &interruptR1) < 0)
   {
@@ -119,6 +130,7 @@ void platform_run::pins_setup()
 
 void platform_run::reset_odom()
 {
+  ROS_INFO_STREAM(posL1_ << " " << posL2_ << " " << posR1_ << " " << posR2_ << "\n");
   Counter1_ = 0;
   Counter2_ = 0;
   Counter3_ = 0;
@@ -132,62 +144,91 @@ void platform_run::reset_odom()
 
 void platform_run::odometry()
 {
-  // integrare angolo
-  
+  std_msgs::Float64 odom_msg = std_msgs::Float64();
+    
   while(ros::ok())
   {
-    this->enc_diff_   = (posR1_ + posR2_) - (posL1_ + posL2_);
     this->curr_pos_   = (posR1_ + posR2_ + posL1_ + posL2_)/4.0;
+    odom_msg.data =  this->curr_pos_;
+    _pub_odom.publish(odom_msg);
     this->_rate.sleep();
   }
 }
 
-int  platform_run::get_nom_speed(double movement_length_)
+int  platform_run::get_nom_speed(double movement_length_,int min_over)
 {
   int vel_ret = 0;
 
   if(this->curr_pos_ < (perc_ramp * movement_length_))
   {
-    vel_ret = int( this->curr_pos_ * (max_speed/(perc_ramp * movement_length_))) + 2;
-    return vel_ret;
+    vel_ret = int( this->curr_pos_ * (MAX_PWM_SPEED/(perc_ramp * movement_length_)));
+    return std::max(vel_ret,MIN_PWM_RANGE + min_over);
   }
   if(this->curr_pos_ > (movement_length_ - (perc_ramp * movement_length_)))
   {
-    vel_ret = int( (movement_length_ - this->curr_pos_) * (max_speed/(perc_ramp * movement_length_))) + 2;
-    return vel_ret;
+    vel_ret = int( (movement_length_ - this->curr_pos_) * (MAX_PWM_SPEED/(perc_ramp * movement_length_)));
+    return std::max(vel_ret,MIN_PWM_RANGE + min_over);
   }
   if(this->curr_pos_ < movement_length_ )
   {
-    return int(max_speed);
+    return int(MAX_PWM_SPEED);
   }
   std::cout << "EEERRRROOORORORORORROROROOR";
+  return MIN_PWM_RANGE;
 }
 
-void platform_run::move(int forw,double movement_length_)
+void platform_run::move(int forw,double movement_length_,double timeout)
 {
   
+  int finecorsa = 0;
+
   if (forw == 0)
   {
-    digitalWrite(PWM_dir_1,HIGH);
+    digitalWrite(PWM_dir_1,LOW);
     digitalWrite(PWM_dir_2,HIGH);
   }
   else
   {
-    digitalWrite(PWM_dir_1,LOW);
+    digitalWrite(PWM_dir_1,HIGH);
     digitalWrite(PWM_dir_2,LOW);
   }
   
-  int corr      = 1;//forw ? 1:-1;
-  int intensity = 0;
-	
-  
-  while(this->curr_pos_ < movement_length_)
-  {
-    intensity = get_nom_speed(movement_length_);
-    softPwmWrite(PWM_pin_1, intensity * this->_safe) ;	
-    softPwmWrite(PWM_pin_2, intensity * this->_safe) ;	
+  int intensity  = 0;
+	int min_over   = 0;
+  double pos_wd  = 0;
 
-    delay (acc_delay) ;
+  auto start = std::chrono::steady_clock::now();
+  while((this->curr_pos_ < (movement_length_ + 0.2)) && ros::ok())
+  {
+    
+    finecorsa += (forw == 0) ? (digitalRead(bumper_pin_1) == 0) : (digitalRead(bumper_pin_2) == 0);
+    if (finecorsa > finecorsa_int)
+    {
+      ROS_INFO_STREAM("finecorsa");
+      break;
+    }
+
+    if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() > 500)
+    {
+      start = std::chrono::steady_clock::now(); 
+      if ((this->curr_pos_ - pos_wd) < 0.0025)
+      {
+        min_over = min_over + 1;
+        ROS_WARN_STREAM("override: " << min_over << "\n");
+      }
+      else
+      {
+        min_over = (min_over > 1) ? min_over - 1 : 0 ;
+        // ROS_WARN_STREAM("override lowered" << min_over << "\n");
+        // in case reset ovveride based on distance
+      }
+      pos_wd = this->curr_pos_;
+    }
+
+    intensity = this->get_nom_speed(movement_length_,min_over);
+    softPwmWrite(PWM_pin_1, intensity ) ;	
+    softPwmWrite(PWM_pin_2, intensity ) ;	
+    this->_rate.sleep();
   }
 
   softPwmWrite (PWM_pin_1, 0) ;	
@@ -196,13 +237,29 @@ void platform_run::move(int forw,double movement_length_)
 
 }
 
+void *thread_func(void *data)
+{
+
+  char hostname[1024];
+  gethostname(hostname, 1024);
+
+  ros::NodeHandle nh("~");
+  platform_run plat = platform_run(&nh,std::string(hostname));
+
+  ros::AsyncSpinner spinner(4); 
+  spinner.start();
+
+  ros::waitForShutdown();
+  return NULL;
+}
+
 int main(int argc, char **argv)
 {      
 
-//   struct sched_param param;
-//           pthread_attr_t attr;
-//           pthread_t thread;
-//           int ret;
+  struct sched_param param;
+  pthread_attr_t attr;
+  pthread_t thread;
+  int ret;
   
   /* Lock memory */
   if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1) {
@@ -210,69 +267,68 @@ int main(int argc, char **argv)
           exit(-2);
   }
 
-//   /* Initialize pthread attributes (default values) */
-//   ret = pthread_attr_init(&attr);
-//   if (ret) {
-//           printf("init pthread attributes failed\n");
-//           exit(-2);
-//   }
+  /* Initialize pthread attributes (default values) */
+  ret = pthread_attr_init(&attr);
+  if (ret) {
+          printf("init pthread attributes failed\n");
+          exit (1) ;
+  }
 
-//   /* Set a specific stack size  */
-//   ret = pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN);
-//   if (ret) {
-//       printf("pthread setstacksize failed\n");
-//       exit(-2);
-//   }
+  /* Set a specific stack size  */
+  ret = pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN);
+  if (ret) {
+      printf("pthread setstacksize failed\n");
+      exit (1) ;
+  }
 
-//   /* Set scheduler policy and priority of pthread */
-//   ret = pthread_attr_setschedpolicy(&attr, SCHED_RR);
-//   if (ret) {
-//           printf("pthread setschedpolicy failed\n");
-//         exit(-2);
-//   }
-
-//   param.sched_priority = 80;
-//   ret = pthread_attr_setschedparam(&attr, &param);
-//   if (ret) {
-//           printf("pthread setschedparam failed\n");
-//           exit(-2);
-//   }
-//   /* Use scheduling parameters of attr */
-//   ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
-//   if (ret) {
-//           printf("pthread setinheritsched failed\n");
-//           exit(-2);
-//   }
-
-    if (wiringPiSetup () == -1)
-    exit (1) ;
+  /* Set scheduler policy and priority of pthread */
+  ret = pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+  if (ret) {
+          printf("pthread setschedpolicy failed\n");
+          exit (1) ;
+  }
+  param.sched_priority = 80;
+  ret = pthread_attr_setschedparam(&attr, &param);
+  if (ret) {
+          printf("pthread setschedparam failed\n");
+          exit (1) ;
+  }
+  /* Use scheduling parameters of attr */
+  ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+  if (ret) {
+          printf("pthread setinheritsched failed\n");
+          exit (1) ;
+  }
 
 
-    char hostname[1024];
-    gethostname(hostname, 1024);
 
-    ros::init(argc, argv, "rp_control_" + std::string(hostname), ros::init_options::NoSigintHandler);
-    ros::NodeHandle nh("~");
-
-    struct sigaction sigIntHandler;
-
-    // sigIntHandler.sa_handler = my_handler;
-    // sigemptyset(&sigIntHandler.sa_mask);
-    // sigIntHandler.sa_flags = 0;
-
-    // sigaction(SIGINT, &sigIntHandler, NULL);
-    signal(SIGINT, my_handler);
-
-    platform_run plat = platform_run(&nh,std::string(hostname));
+  if (wiringPiSetup () == -1)
+  exit (1) ;
 
 
-    ros::AsyncSpinner spinner(4); 
-    spinner.start();
+  char hostname[1024];
+  gethostname(hostname, 1024);
 
-    ros::waitForShutdown();
+  ros::init(argc, argv, "rp_control_" + std::string(hostname), ros::init_options::NoSigintHandler);
+  // ros::NodeHandle nh("~");
+
+  struct sigaction sigIntHandler;
+
+  signal(SIGINT, my_handler);
+
+  /* Create a pthread with specified attributes */
+  ret = pthread_create(&thread, &attr, thread_func, NULL);
+  if (ret) {
+          printf("create pthread failed\n");
+          exit (1) ;
+  }
+
+  /* Join the thread and wait until it is done */
+  ret = pthread_join(thread, NULL);
+  if (ret)
+          printf("join pthread failed: %m\n");
 
 
 }
 
 
-//TODO ignora fine coras in partenza

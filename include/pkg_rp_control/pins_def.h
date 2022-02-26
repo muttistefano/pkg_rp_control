@@ -22,7 +22,7 @@ constexpr int EncL2 = 4;
 
 constexpr double RAD_W      = 0.06;
 constexpr int MAX_PWM_RANGE = 80;
-constexpr int MIN_PWM_RANGE = 5;
+constexpr int MIN_PWM_RANGE = 4;
 constexpr int MAX_PWM_SPEED = 25;
 constexpr double perc_ramp  = 0.3;
 

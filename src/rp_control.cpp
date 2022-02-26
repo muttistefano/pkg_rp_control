@@ -19,7 +19,6 @@ platform_run::platform_run(ros::NodeHandle* nh_in, std::string host_name)
 
     MovePlat  = _nh.advertiseService("MovePlat_" + _host_name, &platform_run::MovePlatSrvCall, this);
     _pub_conf = _nh.advertise<std_msgs::Int8>("Plat_conf_"+ _host_name, 1, true);
-    _pub_odom = _nh.advertise<std_msgs::Float64>("Plat_odom_"+ _host_name, 1, true);
 
     this->pins_setup();
 
@@ -48,23 +47,39 @@ bool platform_run::MovePlatSrvCall(pkg_rp_msgs::MovePlatSrv::Request  &req,
     std::cout << "Moving plat: " << _host_name << " to pos : " << int(req.position_command) << "\n";
     if (req.position_command == 0)
     {
-      this->move(0,1.9,10);
+      this->move(req.position_command ,1.95,10);
     }
     else if (req.position_command == 1)
     {
-      this->move(1,1.9,10);
+      this->move(req.position_command ,1.95,10);
+    }
+    else if (req.position_command == 100)
+    {
+      this->recover(req.position_command ,1,10);
     }
     else
     {
       return false;
     }
     
-    // ros::Duration(2).sleep();
-    res.position_final = req.position_command;
-    res.success = true;
-    std_msgs::Int8 conf_msg = std_msgs::Int8();
-    conf_msg.data = res.position_final;
-    _pub_conf.publish(conf_msg);
+    if (req.position_command == 100)
+    {
+      res.position_final = 0;
+      res.success = true;
+      std_msgs::Int8 conf_msg = std_msgs::Int8();
+      conf_msg.data = res.position_final;
+      _pub_conf.publish(conf_msg);
+    }
+    else
+    {
+      res.position_final = req.position_command;
+      res.success = true;
+      std_msgs::Int8 conf_msg = std_msgs::Int8();
+      conf_msg.data = res.position_final;
+      _pub_conf.publish(conf_msg);
+    }
+
+
     return true;
 }
 
@@ -144,13 +159,13 @@ void platform_run::reset_odom()
 
 void platform_run::odometry()
 {
-  std_msgs::Float64 odom_msg = std_msgs::Float64();
     
   while(ros::ok())
   {
-    this->curr_pos_   = (posR1_ + posR2_ + posL1_ + posL2_)/4.0;
-    odom_msg.data =  this->curr_pos_;
-    _pub_odom.publish(odom_msg);
+    std::vector<double> posvec = {posR1_,posR2_,posL1_,posL2_};
+    std::sort(posvec.begin(),posvec.end());
+    this->curr_pos_   = (posvec[1] + posvec[2])/2.0;
+
     this->_rate.sleep();
   }
 }
@@ -198,10 +213,71 @@ void platform_run::move(int forw,double movement_length_,double timeout)
   double pos_wd  = 0;
 
   auto start = std::chrono::steady_clock::now();
-  while((this->curr_pos_ < (movement_length_ + 0.2)) && ros::ok())
+  auto wd_init = std::chrono::steady_clock::now();
+
+  while((this->curr_pos_ < (movement_length_ + 0.5)) && ros::ok())
   {
     
     finecorsa += (forw == 0) ? (digitalRead(bumper_pin_1) == 0) : (digitalRead(bumper_pin_2) == 0);
+    if (finecorsa > finecorsa_int)
+    {
+      ROS_INFO_STREAM("finecorsa");
+      break;
+    }
+
+    if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() > 250)
+    {
+      start = std::chrono::steady_clock::now(); 
+      if ((this->curr_pos_ - pos_wd) < 0.0015)
+      {
+        min_over = min_over + 1;
+        // ROS_WARN_STREAM("override: " << min_over << "\n");
+      }
+      else
+      {
+        if(this->curr_pos_ > (movement_length_/2.0 ))
+        {
+          min_over = (min_over > 1) ? min_over - 1 : 0 ;
+        }
+      }
+      pos_wd = this->curr_pos_;
+    }
+
+    if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wd_init).count() > 120000)
+    {return;}
+    
+    intensity = this->get_nom_speed(movement_length_,min_over);
+    // ROS_WARN_STREAM_THROTTLE(0.5,"override: " << intensity << "\n");
+    softPwmWrite(PWM_pin_1, intensity ) ;	
+    softPwmWrite(PWM_pin_2, intensity ) ;	
+    this->_rate.sleep();
+  }
+
+  softPwmWrite (PWM_pin_1, 0) ;	
+  softPwmWrite (PWM_pin_2, 0) ;	
+  reset_odom();
+
+}
+
+void platform_run::recover(int forw,double movement_length_,double timeout)
+{
+  
+  int finecorsa = 0;
+
+
+  digitalWrite(PWM_dir_1,LOW);
+  digitalWrite(PWM_dir_2,HIGH);
+
+  
+  int intensity  = 0;
+	int min_over   = 0;
+  double pos_wd  = 0;
+
+  auto start = std::chrono::steady_clock::now();
+  while((this->curr_pos_ < (movement_length_ )) && ros::ok())
+  {
+    
+    finecorsa += (forw == 100) ? (digitalRead(bumper_pin_1) == 0) : (digitalRead(bumper_pin_2) == 0);
     if (finecorsa > finecorsa_int)
     {
       ROS_INFO_STREAM("finecorsa");
@@ -219,13 +295,11 @@ void platform_run::move(int forw,double movement_length_,double timeout)
       else
       {
         min_over = (min_over > 1) ? min_over - 1 : 0 ;
-        // ROS_WARN_STREAM("override lowered" << min_over << "\n");
-        // in case reset ovveride based on distance
       }
       pos_wd = this->curr_pos_;
     }
 
-    intensity = this->get_nom_speed(movement_length_,min_over);
+    intensity = MIN_PWM_RANGE + min_over;
     softPwmWrite(PWM_pin_1, intensity ) ;	
     softPwmWrite(PWM_pin_2, intensity ) ;	
     this->_rate.sleep();

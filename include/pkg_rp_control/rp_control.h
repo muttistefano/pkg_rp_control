@@ -52,7 +52,6 @@ private:
     ros::ServiceServer MovePlat;
     ros::NodeHandle _nh;
     ros::Publisher _pub_conf;
-    ros::Publisher _pub_odom;
 
     std::string _host_name;
     int _actual_configuration = 0;
@@ -67,6 +66,7 @@ private:
     void fine_corsa_2();
 
     void move(int forw,double movement_length_, double timeout);
+    void recover(int forw,double movement_length_, double timeout);
     void reset_odom();
     int  get_nom_speed(double movement_length_,int min_over);
 };
